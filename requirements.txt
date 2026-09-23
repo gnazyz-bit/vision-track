@@ -1,0 +1,12 @@
+ultralytics
+supervision
+streamlit
+opencv-python
+torch
+torchvision
+onnx
+onnxruntime
+numpy
+pandas
+Pillow
+PyYAML
