@@ -1,5 +1,5 @@
 ultralytics
-supervision
+supervision==0.27.0
 streamlit
 opencv-python
 torch
