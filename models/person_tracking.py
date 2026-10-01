@@ -11,7 +11,7 @@ from ultralytics import YOLO
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
-VIDEO_PATH = PROJECT_ROOT / "data" / "raw_videos" / "test.mp4"
+VIDEO_PATH = PROJECT_ROOT / "data" / "raw_videos" / "mall.mp4"
 
 
 # --------------------------------------------------
