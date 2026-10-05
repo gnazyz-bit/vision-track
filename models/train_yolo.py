@@ -46,17 +46,29 @@ model = YOLO("yolov8n.pt")
 results = model.train(
     data=str(DATASET_YAML),
 
-    epochs=20,
-    imgsz=640,
+    epochs=30,
+    imgsz=768,
     batch=8,
 
     optimizer="AdamW",
-    lr0=0.001,
+    lr0=0.0005,
+    lrf=0.01, 
+    cos_lr=True,
+
+    weight_decay=0.0005,
+    momentum=0.937,
+
+    patience=10,
+
+    # Data augmentation
+    fliplr=0.5,
+    translate=0.1,
+    scale=0.4,
+    mosaic=1.0,
+    mixup=0.1,
 
     device=device,
 
-    patience=7,
-
     project=str(PROJECT_ROOT / "runs"),
-    name="visiontrack_person_v2",
+    name="visiontrack_person_v4",
 )
