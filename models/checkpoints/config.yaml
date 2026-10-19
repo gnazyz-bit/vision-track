@@ -1,0 +1,48 @@
+
+# VisionTrack Model Configuration
+
+project:
+  name: VisionTrack
+  task: person_detection_tracking_counting
+  framework: ultralytics
+  model_family: YOLOv8
+
+models:
+  pretrained: yolov8n.pt
+  fine_tuned: models/checkpoints/best.pt
+  exported_onnx: models/checkpoints/best.onnx
+  quantized_onnx: models/checkpoints/best_quantized.onnx
+
+training:
+  dataset: data/person_dataset/data.yaml
+  epochs: 30
+  image_size: 640
+  classes:
+    0: person
+
+quantization:
+  method: static_int8
+  format: QDQ
+  calibration_images: 50
+  runtime: onnxruntime
+  execution_provider: CPUExecutionProvider
+  original_onnx_size_mb: 11.67
+  quantized_onnx_size_mb: 3.22
+
+evaluation:
+  dataset: data/person_dataset/data.yaml
+  split: val
+  images: 96
+  ground_truth_objects: 249
+  device: cpu
+  confidence_threshold: 0.35
+  iou_threshold: 0.50
+
+application:
+  default_model: yolov8n.pt
+  default_confidence: 0.35
+  streams:
+    - Crosswalk
+    - Mall
+  tracker: ByteTrack
+  counting: LineZone

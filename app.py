@@ -1,15 +1,38 @@
+"""VisionTrack: simultaneous two-video detection, tracking and counting.
+Run: python -m streamlit run app.py
+"""
+from __future__ import annotations
+
+import logging
 from pathlib import Path
+import tempfile
+import threading
 import time
 
 import cv2
+import numpy as np
 import streamlit as st
 import supervision as sv
 from ultralytics import YOLO
 
+ROOT = Path(__file__).resolve().parent
 
-# --------------------------------------------------
-# Page configuration
-# --------------------------------------------------
+VIDEO_PATHS = {
+    "Crosswalk": ROOT / "data" / "raw_videos" / "crosswalk.mp4",
+    "Mall": ROOT / "data" / "raw_videos" / "mall.mp4",
+}
+
+MODEL_PATH = ROOT / "yolov8n.pt"
+
+DISPLAY_WIDTH, DISPLAY_HEIGHT = 960, 540
+
+LOG_FILE = ROOT / "logs" / "app_errors.log"
+LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
+
+logging.basicConfig(
+    filename=str(LOG_FILE),
+    level=logging.ERROR
+)
 
 st.set_page_config(
     page_title="VisionTrack",
@@ -18,672 +41,761 @@ st.set_page_config(
 )
 
 st.title("VisionTrack")
-st.caption(
-    "Multi-stream person detection, tracking and counting"
-)
+st.caption("Two-camera person detection, tracking and line counting")
+
+
+@st.cache_resource(show_spinner="Loading YOLO...")
+def load_model(path: str):
+    return YOLO(path), threading.Lock()
+
+
+def display_frame(frame):
+    """Letterbox without cropping or stretching; constant output resolution."""
+
+    height, width = frame.shape[:2]
+
+    canvas = np.zeros(
+        (DISPLAY_HEIGHT, DISPLAY_WIDTH, 3),
+        dtype=np.uint8
+    )
+
+    scale = min(
+        DISPLAY_WIDTH / width,
+        DISPLAY_HEIGHT / height
+    )
+
+    new_w = max(1, round(width * scale))
+    new_h = max(1, round(height * scale))
+
+    interpolation = (
+        cv2.INTER_AREA
+        if scale < 1
+        else cv2.INTER_LINEAR
+    )
+
+    resized = cv2.resize(
+        frame,
+        (new_w, new_h),
+        interpolation=interpolation
+    )
+
+    x = (DISPLAY_WIDTH - new_w) // 2
+    y = (DISPLAY_HEIGHT - new_h) // 2
+
+    canvas[y:y + new_h, x:x + new_w] = resized
+
+    return cv2.cvtColor(
+        canvas,
+        cv2.COLOR_BGR2RGB
+    )
+
+
+class VideoWorker:
+
+    def __init__(
+        self,
+        name,
+        source,
+        model,
+        model_lock,
+        config,
+        confidence,
+        threshold
+    ):
+
+        self.name = name
+        self.source = Path(source)
+
+        self.model = model
+        self.model_lock = model_lock
+
+        self.config = config
+        self.confidence = confidence
+        self.threshold = threshold
+
+        self.lock = threading.Lock()
+        self.stop_event = threading.Event()
+        self.thread = None
+
+        self.cap = cv2.VideoCapture(str(self.source))
+
+        if not self.cap.isOpened():
+            self.cap.release()
+            raise OSError(
+                f"Cannot open {name}: {self.source}"
+            )
+
+        self.width = int(
+            self.cap.get(cv2.CAP_PROP_FRAME_WIDTH)
+        )
+
+        self.height = int(
+            self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT)
+        )
+
+        if self.width <= 0 or self.height <= 0:
+            self.cap.release()
+            raise ValueError(
+                f"Invalid video dimensions: {name}"
+            )
+
+        self.source_fps = float(
+            self.cap.get(cv2.CAP_PROP_FPS)
+        )
+
+        if not 1 <= self.source_fps <= 120:
+            self.source_fps = 25.0
+
+        if name == "Crosswalk":
+
+            y = int(self.height * 0.51)
+
+            p1 = sv.Point(0, y)
+
+            p2 = sv.Point(
+                int(self.width * 0.58),
+                y
+            )
+
+        else:
+
+            y = int(self.height * 0.93)
+
+            p1 = sv.Point(
+                int(self.width * 0.03),
+                y
+            )
+
+            p2 = sv.Point(
+                int(self.width * 0.91),
+                y
+            )
+
+        self.p1 = p1
+        self.p2 = p2
+
+        self.tracker = sv.ByteTrack(
+            frame_rate=int(round(self.source_fps))
+        )
+
+        self.zone = sv.LineZone(
+            start=p1,
+            end=p2,
+            triggering_anchors=[
+                sv.Position.BOTTOM_CENTER
+            ]
+        )
+
+        self.frame_rgb = None
+
+        self.people = 0
+        self.in_count = 0
+        self.out_count = 0
+
+        self.processing_fps = 0.0
+        self.latency_ms = 0.0
+
+        self.done = False
+        self.error = None
+
+        # Show the first frame before inference
+        ok, first = self.cap.read()
+
+        if ok:
+
+            self.frame_rgb = display_frame(first)
+
+            self.cap.set(
+                cv2.CAP_PROP_POS_FRAMES,
+                0
+            )
+
+        else:
+
+            self.done = True
+            self.cap.release()
+
+    def start(self):
+
+        if not self.done:
+
+            self.thread = threading.Thread(
+                target=self.run,
+                name=f"VisionTrack-{self.name}",
+                daemon=True
+            )
+
+            self.thread.start()
+
+    def stop(self):
+
+        self.stop_event.set()
+
+        if self.thread and self.thread.is_alive():
+
+            self.thread.join(timeout=3)
+
+        if not self.thread or not self.thread.is_alive():
+
+            self.cap.release()
+
+    def snapshot(self):
+
+        with self.lock:
+
+            return {
+                "image": self.frame_rgb,
+                "people": self.people,
+                "in": self.in_count,
+                "out": self.out_count,
+                "fps": self.processing_fps,
+                "latency": self.latency_ms,
+                "done": self.done,
+                "error": self.error,
+            }
+
+    def process(self, frame):
+
+        output = frame.copy()
+
+        people = 0
+
+        if self.config["detection"]:
+
+            # Shared YOLO model
+            with self.model_lock:
+
+                prediction = self.model(
+                    frame,
+                    classes=[0],
+                    conf=self.confidence,
+                    verbose=False
+                )[0]
+
+            detections = (
+                sv.Detections.from_ultralytics(
+                    prediction
+                )
+            )
+
+            if self.config["tracking"]:
+
+                detections = (
+                    self.tracker.update_with_detections(
+                        detections
+                    )
+                )
+
+            people = len(detections)
+
+            ids = detections.tracker_id
+
+            for i, (box, score) in enumerate(
+                zip(
+                    detections.xyxy,
+                    detections.confidence
+                )
+            ):
+
+                x1, y1, x2, y2 = (
+                    int(v) for v in box
+                )
+
+                cv2.rectangle(
+                    output,
+                    (x1, y1),
+                    (x2, y2),
+                    (0, 220, 0),
+                    2
+                )
+
+                label = (
+                    f"Person {float(score):.2f}"
+                )
+
+                if (
+                    self.config["tracking"]
+                    and ids is not None
+                ):
+
+                    label = (
+                        f"ID {int(ids[i])} "
+                        f"{float(score):.2f}"
+                    )
+
+                cv2.putText(
+                    output,
+                    label,
+                    (x1, max(20, y1 - 8)),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.55,
+                    (0, 220, 0),
+                    2
+                )
+
+            if self.config["counting"]:
+
+                self.zone.trigger(detections)
+
+                cv2.line(
+                    output,
+                    (
+                        int(self.p1.x),
+                        int(self.p1.y)
+                    ),
+                    (
+                        int(self.p2.x),
+                        int(self.p2.y)
+                    ),
+                    (0, 0, 255),
+                    3
+                )
+
+        return output, people
+
+    def run(self):
+
+        frame_number = 0
+        started_at = time.perf_counter()
+
+        try:
+
+            while not self.stop_event.is_set():
+
+                # Independent playback clock
+                target_time = (
+                    started_at
+                    + frame_number / self.source_fps
+                )
+
+                wait = (
+                    target_time
+                    - time.perf_counter()
+                )
+
+                if wait > 0:
+
+                    if self.stop_event.wait(wait):
+                        break
+
+                success, frame = self.cap.read()
+
+                if not success:
+                    break
+
+                t0 = time.perf_counter()
+
+                result, people = self.process(frame)
+
+                latency = (
+                    time.perf_counter() - t0
+                ) * 1000
+
+                rgb = display_frame(result)
+
+                with self.lock:
+
+                    self.frame_rgb = rgb
+
+                    self.people = people
+
+                    self.in_count = int(
+                        self.zone.in_count
+                    )
+
+                    self.out_count = int(
+                        self.zone.out_count
+                    )
+
+                    self.latency_ms = latency
+
+                    self.processing_fps = (
+                        1000 / latency
+                        if latency > 0
+                        else 0.0
+                    )
+
+                frame_number += 1
+
+        except Exception as exc:
+
+            logging.exception(
+                "Error processing %s",
+                self.name
+            )
+
+            with self.lock:
+                self.error = str(exc)
+
+        finally:
+
+            self.cap.release()
+
+            with self.lock:
+                self.done = True
+
+
+def stop_workers():
+
+    workers = st.session_state.get(
+        "workers",
+        {}
+    )
+
+    for worker in workers.values():
+        worker.stop()
+
+    st.session_state.workers = {}
+    st.session_state.running = False
+
+    temp = st.session_state.get("upload_dir")
+
+    if temp is not None:
+
+        if all(
+            not w.thread
+            or not w.thread.is_alive()
+            for w in workers.values()
+        ):
+
+            temp.cleanup()
+
+            st.session_state.upload_dir = None
 
 
 # --------------------------------------------------
-# Project paths
+# Session state
 # --------------------------------------------------
 
-PROJECT_ROOT = Path(__file__).resolve().parent
+if "workers" not in st.session_state:
+    st.session_state.workers = {}
 
-VIDEO_PATHS = {
-    "Crosswalk": (
-        PROJECT_ROOT
-        / "data"
-        / "raw_videos"
-        / "crosswalk.mp4"
-    ),
+if "running" not in st.session_state:
+    st.session_state.running = False
 
-    "Mall": (
-        PROJECT_ROOT
-        / "data"
-        / "raw_videos"
-        / "mall.mp4"
-    ),
-}
+if "upload_dir" not in st.session_state:
+    st.session_state.upload_dir = None
 
 
 # --------------------------------------------------
-# Constants
-# --------------------------------------------------
-
-PERSON_CLASS_ID = 0
-
-
-# --------------------------------------------------
-# Sidebar controls
+# Sidebar
 # --------------------------------------------------
 
 st.sidebar.header("Controls")
 
-confidence_threshold = st.sidebar.slider(
+confidence = st.sidebar.slider(
     "Detection confidence",
-    min_value=0.1,
-    max_value=1.0,
-    value=0.5,
-    step=0.05
+    0.10,
+    0.95,
+    0.35,
+    0.05
 )
 
-enable_tracking = st.sidebar.toggle(
-    "Tracking",
-    value=True
+threshold = st.sidebar.number_input(
+    "Crowd threshold (people)",
+    min_value=1,
+    value=20
 )
 
-enable_counting = st.sidebar.toggle(
-    "Counting",
-    value=True
+st.sidebar.caption(
+    "Model: pre-trained YOLOv8n"
 )
 
-start_button = st.sidebar.button(
-    "Start processing",
-    type="primary"
-)
+camera_config = {}
 
+for name in VIDEO_PATHS:
 
-# --------------------------------------------------
-# Load YOLO model
-# --------------------------------------------------
-
-@st.cache_resource
-def load_model():
-
-    return YOLO("yolov8n.pt")
-
-
-model = load_model()
-
-
-# --------------------------------------------------
-# Create stream
-# --------------------------------------------------
-
-def create_stream(name, video_path):
-
-    cap = cv2.VideoCapture(
-        str(video_path)
-    )
-
-    if not cap.isOpened():
-
-        return None
-
-
-    frame_width = int(
-        cap.get(
-            cv2.CAP_PROP_FRAME_WIDTH
-        )
-    )
-
-    frame_height = int(
-        cap.get(
-            cv2.CAP_PROP_FRAME_HEIGHT
-        )
-    )
-
-
-    # --------------------------------------------------
-    # Crosswalk counting line
-    # --------------------------------------------------
-
-    if name == "Crosswalk":
-
-        line_y = int(
-            frame_height * 0.51
-        )
-
-        line_start = sv.Point(
-            x=0,
-            y=line_y
-        )
-
-        line_end = sv.Point(
-            x=int(
-                frame_width * 0.58
-            ),
-            y=line_y
-        )
-
-
-    # --------------------------------------------------
-    # Mall counting line
-    # --------------------------------------------------
-
-    elif name == "Mall":
-
-        line_y = int(
-            frame_height * 0.93
-        )
-
-        line_start = sv.Point(
-            x=int(
-                frame_width * 0.03
-            ),
-            y=line_y
-        )
-
-        line_end = sv.Point(
-            x=int(
-                frame_width * 0.91
-            ),
-            y=line_y
-        )
-
-
-    else:
-
-        raise ValueError(
-            f"Unknown stream: {name}"
-        )
-
-
-    # Each stream gets its own tracker
-    tracker = sv.ByteTrack()
-
-
-    # Each stream gets its own counting zone
-    line_zone = sv.LineZone(
-        start=line_start,
-        end=line_end,
-        triggering_anchors=[
-            sv.Position.BOTTOM_CENTER
-        ]
-    )
-
-
-    return {
-        "cap": cap,
-        "tracker": tracker,
-        "line_zone": line_zone,
-        "line_start": line_start,
-        "line_end": line_end,
-        "finished": False,
-    }
-
-
-# --------------------------------------------------
-# Process one frame
-# --------------------------------------------------
-
-def process_frame(
-    frame,
-    stream,
-    confidence_threshold,
-    enable_tracking,
-    enable_counting
-):
-
-    start_time = time.perf_counter()
-
-
-    # --------------------------------------------------
-    # Detection
-    # --------------------------------------------------
-
-    results = model(
-        frame,
-        classes=[PERSON_CLASS_ID],
-        conf=confidence_threshold,
-        verbose=False
-    )
-
-    result = results[0]
-
-    detections = (
-        sv.Detections.from_ultralytics(
-            result
-        )
-    )
-
-
-    # --------------------------------------------------
-    # Tracking
-    # --------------------------------------------------
-
-    if enable_tracking:
-
-        detections = (
-            stream["tracker"]
-            .update_with_detections(
-                detections
-            )
-        )
-
-
-    # --------------------------------------------------
-    # Counting
-    # --------------------------------------------------
-
-    if (
-        enable_tracking
-        and enable_counting
+    with st.sidebar.expander(
+        name,
+        expanded=True
     ):
 
-        stream["line_zone"].trigger(
-            detections
+        enabled = st.checkbox(
+            "Enable camera",
+            value=True,
+            key=f"enabled_{name}"
+        )
+
+        uploaded = st.file_uploader(
+            "Upload video (optional)",
+            type=["mp4", "mov", "avi"],
+            key=f"upload_{name}"
+        )
+
+        detection = st.checkbox(
+            "Detection",
+            value=True,
+            key=f"detection_{name}"
+        )
+
+        tracking = st.checkbox(
+            "Tracking",
+            value=True,
+            disabled=not detection,
+            key=f"tracking_{name}"
+        )
+
+        counting = st.checkbox(
+            "Counting",
+            value=True,
+            disabled=not (
+                detection and tracking
+            ),
+            key=f"counting_{name}"
+        )
+
+        camera_config[name] = {
+            "enabled": enabled,
+            "uploaded": uploaded,
+            "detection": detection,
+            "tracking": detection and tracking,
+            "counting": (
+                detection
+                and tracking
+                and counting
+            ),
+        }
+
+
+# --------------------------------------------------
+# Start / Stop buttons
+# --------------------------------------------------
+
+left, right = st.sidebar.columns(2)
+
+start_clicked = left.button(
+    "Start / Restart",
+    type="primary",
+    use_container_width=True
+)
+
+stop_clicked = right.button(
+    "Stop",
+    use_container_width=True
+)
+
+if stop_clicked:
+    stop_workers()
+
+if start_clicked:
+
+    stop_workers()
+
+    try:
+
+        model, model_lock = load_model(
+            str(MODEL_PATH)
+            if MODEL_PATH.is_file()
+            else "yolov8n.pt"
+        )
+
+        directory = tempfile.TemporaryDirectory(
+            prefix="visiontrack_"
+        )
+
+        st.session_state.upload_dir = directory
+
+        new_workers = {}
+
+        for name, default_source in VIDEO_PATHS.items():
+
+            cfg = camera_config[name]
+
+            if not cfg["enabled"]:
+                continue
+
+            source = default_source
+
+            if cfg["uploaded"] is not None:
+
+                suffix = Path(
+                    cfg["uploaded"].name
+                ).suffix.lower()
+
+                source = (
+                    Path(directory.name)
+                    / f"{name}{suffix}"
+                )
+
+                source.write_bytes(
+                    cfg["uploaded"].getvalue()
+                )
+
+            try:
+
+                worker = VideoWorker(
+                    name,
+                    source,
+                    model,
+                    model_lock,
+                    cfg,
+                    confidence,
+                    threshold
+                )
+
+                new_workers[name] = worker
+
+            except Exception as exc:
+
+                logging.exception(
+                    "Unable to open %s",
+                    name
+                )
+
+                st.error(
+                    f"{name}: {exc}"
+                )
+
+        st.session_state.workers = new_workers
+
+        st.session_state.running = bool(
+            new_workers
+        )
+
+        for worker in new_workers.values():
+            worker.start()
+
+        if not new_workers:
+
+            stop_workers()
+
+            st.warning(
+                "No video source available."
+            )
+
+    except Exception as exc:
+
+        logging.exception(
+            "Start failure"
+        )
+
+        stop_workers()
+
+        st.error(
+            f"Start failed: {exc}"
         )
 
 
-    # --------------------------------------------------
-    # Draw detections with tracker IDs
-    # --------------------------------------------------
+if st.session_state.running:
 
-    if (
-        enable_tracking
-        and detections.tracker_id
-        is not None
+    st.sidebar.caption(
+        "To apply changed settings, "
+        "click Start / Restart."
+    )
+
+
+# --------------------------------------------------
+# Live dashboard
+# --------------------------------------------------
+
+@st.fragment(run_every="0.2s")
+def dashboard():
+
+    workers = st.session_state.workers
+
+    if not workers:
+
+        st.info(
+            "Enable cameras and click Start / Restart."
+        )
+
+        return
+
+    columns = st.columns(
+        2,
+        gap="medium"
+    )
+
+    snapshots = {}
+
+    for column, name in zip(
+        columns,
+        VIDEO_PATHS
     ):
 
-        for (
-            xyxy,
-            confidence,
-            tracker_id
-        ) in zip(
-            detections.xyxy,
-            detections.confidence,
-            detections.tracker_id
-        ):
+        with column:
 
-            x1, y1, x2, y2 = map(
-                int,
-                xyxy
-            )
+            st.subheader(name)
 
-            cv2.rectangle(
-                frame,
-                (x1, y1),
-                (x2, y2),
-                (0, 255, 0),
-                2
-            )
+            worker = workers.get(name)
 
-            label = (
-                f"ID {tracker_id} "
-                f"{confidence:.2f}"
-            )
+            if worker is None:
 
-            cv2.putText(
-                frame,
-                label,
-                (
-                    x1,
-                    max(
-                        y1 - 10,
-                        20
-                    )
-                ),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.6,
-                (0, 255, 0),
-                2
-            )
-
-
-    # --------------------------------------------------
-    # Draw detections without tracking
-    # --------------------------------------------------
-
-    else:
-
-        for (
-            xyxy,
-            confidence
-        ) in zip(
-            detections.xyxy,
-            detections.confidence
-        ):
-
-            x1, y1, x2, y2 = map(
-                int,
-                xyxy
-            )
-
-            cv2.rectangle(
-                frame,
-                (x1, y1),
-                (x2, y2),
-                (0, 255, 0),
-                2
-            )
-
-            label = (
-                f"Person "
-                f"{confidence:.2f}"
-            )
-
-            cv2.putText(
-                frame,
-                label,
-                (
-                    x1,
-                    max(
-                        y1 - 10,
-                        20
-                    )
-                ),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.6,
-                (0, 255, 0),
-                2
-            )
-
-
-    # --------------------------------------------------
-    # Draw counting line
-    # --------------------------------------------------
-
-    if enable_counting:
-
-        line_start = (
-            stream["line_start"]
-        )
-
-        line_end = (
-            stream["line_end"]
-        )
-
-        cv2.line(
-            frame,
-            (
-                line_start.x,
-                line_start.y
-            ),
-            (
-                line_end.x,
-                line_end.y
-            ),
-            (0, 0, 255),
-            3
-        )
-
-
-    # --------------------------------------------------
-    # Performance metrics
-    # --------------------------------------------------
-
-    latency_ms = (
-        time.perf_counter()
-        - start_time
-    ) * 1000
-
-
-    if latency_ms > 0:
-
-        fps = (
-            1000.0
-            / latency_ms
-        )
-
-    else:
-
-        fps = 0.0
-
-
-    return (
-        frame,
-        fps,
-        latency_ms
-    )
-
-
-# --------------------------------------------------
-# Dashboard placeholders
-# --------------------------------------------------
-
-dashboard_placeholder = st.empty()
-
-
-with dashboard_placeholder.container():
-
-    col_crosswalk, col_mall = (
-        st.columns(2)
-    )
-
-
-    # --------------------------------------------------
-    # Crosswalk UI
-    # --------------------------------------------------
-
-    with col_crosswalk:
-
-        st.subheader(
-            "Crosswalk"
-        )
-
-        crosswalk_video = (
-            st.empty()
-        )
-
-        crosswalk_metrics = (
-            st.empty()
-        )
-
-
-    # --------------------------------------------------
-    # Mall UI
-    # --------------------------------------------------
-
-    with col_mall:
-
-        st.subheader(
-            "Mall"
-        )
-
-        mall_video = (
-            st.empty()
-        )
-
-        mall_metrics = (
-            st.empty()
-        )
-
-
-# Separate placeholder for status messages
-status_placeholder = st.empty()
-
-
-# --------------------------------------------------
-# Start processing
-# --------------------------------------------------
-
-if start_button:
-
-    status_placeholder.info(
-        "Processing videos..."
-    )
-
-
-    streams = {}
-
-
-    # --------------------------------------------------
-    # Initialize streams
-    # --------------------------------------------------
-
-    for name, path in (
-        VIDEO_PATHS.items()
-    ):
-
-        stream = create_stream(
-            name,
-            path
-        )
-
-
-        if stream is None:
-
-            status_placeholder.error(
-                f"Could not open "
-                f"{name} video: "
-                f"{path}"
-            )
-
-            st.stop()
-
-
-        streams[name] = stream
-
-
-    # --------------------------------------------------
-    # Main processing loop
-    # --------------------------------------------------
-
-    while True:
-
-        all_finished = True
-
-
-        for (
-            name,
-            stream
-        ) in streams.items():
-
-            if stream["finished"]:
+                st.caption(
+                    "Camera disabled or video unavailable"
+                )
 
                 continue
 
+            snap = worker.snapshot()
 
-            success, frame = (
-                stream["cap"].read()
-            )
+            snapshots[name] = snap
 
+            if snap["image"] is not None:
 
-            # ------------------------------------------
-            # End of video
-            # ------------------------------------------
-
-            if not success:
-
-                stream["finished"] = True
-
-                continue
-
-
-            all_finished = False
-
-
-            # ------------------------------------------
-            # Process frame
-            # ------------------------------------------
-
-            (
-                processed_frame,
-                fps,
-                latency_ms
-            ) = process_frame(
-                frame,
-                stream,
-                confidence_threshold,
-                enable_tracking,
-                enable_counting
-            )
-
-
-            # ------------------------------------------
-            # Convert OpenCV BGR to RGB
-            # ------------------------------------------
-
-            processed_frame = (
-                cv2.cvtColor(
-                    processed_frame,
-                    cv2.COLOR_BGR2RGB
-                )
-            )
-
-
-            # ------------------------------------------
-            # Get counting results
-            # ------------------------------------------
-
-            line_zone = (
-                stream["line_zone"]
-            )
-
-
-            if enable_counting:
-
-                in_count = (
-                    line_zone.in_count
-                )
-
-                out_count = (
-                    line_zone.out_count
+                st.image(
+                    snap["image"],
+                    channels="RGB",
+                    use_container_width=True
                 )
 
             else:
 
-                in_count = 0
-                out_count = 0
-
-
-            # ------------------------------------------
-            # Crosswalk display
-            # ------------------------------------------
-
-            if name == "Crosswalk":
-
-                crosswalk_video.image(
-                    processed_frame,
-                    channels="RGB",
-                    width="stretch"
+                st.info(
+                    "Loading video..."
                 )
 
-                crosswalk_metrics.markdown(
-                    f"""
-**IN:** {in_count}  
-**OUT:** {out_count}  
-**FPS:** {fps:.1f}  
-**Latency:** {latency_ms:.1f} ms
-"""
+            if worker.config["counting"]:
+
+                st.write(
+                    f'**IN:** {snap["in"]}  |  '
+                    f'**OUT:** {snap["out"]}'
                 )
 
+            else:
 
-            # ------------------------------------------
-            # Mall display
-            # ------------------------------------------
-
-            elif name == "Mall":
-
-                mall_video.image(
-                    processed_frame,
-                    channels="RGB",
-                    width="stretch"
+                st.write(
+                    "**Counting:** off"
                 )
 
-                mall_metrics.markdown(
-                    f"""
-**IN:** {in_count}  
-**OUT:** {out_count}  
-**FPS:** {fps:.1f}  
-**Latency:** {latency_ms:.1f} ms
-"""
+            st.write(
+                f'**People detected:** {snap["people"]}  |  '
+                f'**Processing FPS:** {snap["fps"]:.1f}  |  '
+                f'**Latency:** {snap["latency"]:.1f} ms'
+            )
+
+            if (
+                worker.config["detection"]
+                and snap["people"] > worker.threshold
+            ):
+
+                st.warning(
+                    "Crowd threshold exceeded: "
+                    f'{snap["people"]} people'
                 )
 
+            if snap["error"]:
 
-        # --------------------------------------------------
-        # Stop when both videos finish
-        # --------------------------------------------------
+                st.error(
+                    snap["error"]
+                )
 
-        if all_finished:
+            elif snap["done"]:
 
-            break
+                st.caption(
+                    "Video finished"
+                )
+
+    if snapshots and all(
+        s["done"]
+        for s in snapshots.values()
+    ):
+
+        st.session_state.running = False
+
+        st.success(
+            "Video processing finished."
+        )
 
 
-    # --------------------------------------------------
-    # Release videos
-    # --------------------------------------------------
-
-    for stream in streams.values():
-
-        stream["cap"].release()
-
-
-    # --------------------------------------------------
-    # Final message
-    # --------------------------------------------------
-
-    status_placeholder.success(
-        "Video processing finished."
-    )
+dashboard()
