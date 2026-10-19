@@ -1,0 +1,67 @@
+{
+  "description": "Observed Streamlit display values manually transcribed from four user-provided screenshots",
+  "ground_truth_available": false,
+  "evaluation_type": "exploratory comparison, not detection accuracy",
+  "runs": [
+    {
+      "model": "best.pt",
+      "confidence": 0.5,
+      "crosswalk_in": 0,
+      "crosswalk_out": 4,
+      "crosswalk_fps": 49.6,
+      "crosswalk_latency_ms": 20.2,
+      "mall_in": 7,
+      "mall_out": 7,
+      "mall_fps": 50.0,
+      "mall_latency_ms": 20.0,
+      "screenshot": "screenshots/Screenshot 2026-10-19 at 16.38.26.png",
+      "crosswalk_total_crossings": 4,
+      "mall_total_crossings": 14
+    },
+    {
+      "model": "best.pt",
+      "confidence": 0.35,
+      "crosswalk_in": 0,
+      "crosswalk_out": 9,
+      "crosswalk_fps": 48.4,
+      "crosswalk_latency_ms": 20.7,
+      "mall_in": 7,
+      "mall_out": 10,
+      "mall_fps": 47.6,
+      "mall_latency_ms": 21.0,
+      "screenshot": "screenshots/Screenshot 2026-10-19 at 16.42.25.png",
+      "crosswalk_total_crossings": 9,
+      "mall_total_crossings": 17
+    },
+    {
+      "model": "yolov8n.pt",
+      "confidence": 0.5,
+      "crosswalk_in": 3,
+      "crosswalk_out": 16,
+      "crosswalk_fps": 45.0,
+      "crosswalk_latency_ms": 22.2,
+      "mall_in": 9,
+      "mall_out": 12,
+      "mall_fps": 44.1,
+      "mall_latency_ms": 22.7,
+      "screenshot": "screenshots/Screenshot 2026-10-19 at 16.46.00.png",
+      "crosswalk_total_crossings": 19,
+      "mall_total_crossings": 21
+    },
+    {
+      "model": "yolov8n.pt",
+      "confidence": 0.35,
+      "crosswalk_in": 5,
+      "crosswalk_out": 21,
+      "crosswalk_fps": 47.8,
+      "crosswalk_latency_ms": 20.9,
+      "mall_in": 8,
+      "mall_out": 12,
+      "mall_fps": 46.9,
+      "mall_latency_ms": 21.3,
+      "screenshot": "screenshots/Screenshot 2026-10-19 at 16.48.07.png",
+      "crosswalk_total_crossings": 26,
+      "mall_total_crossings": 20
+    }
+  ]
+}

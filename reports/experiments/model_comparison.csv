@@ -1,0 +1,5 @@
+model,confidence,crosswalk_in,crosswalk_out,crosswalk_fps,crosswalk_latency_ms,mall_in,mall_out,mall_fps,mall_latency_ms,screenshot,crosswalk_total_crossings,mall_total_crossings
+best.pt,0.5,0,4,49.6,20.2,7,7,50.0,20.0,screenshots/Screenshot 2026-10-19 at 16.38.26.png,4,14
+best.pt,0.35,0,9,48.4,20.7,7,10,47.6,21.0,screenshots/Screenshot 2026-10-19 at 16.42.25.png,9,17
+yolov8n.pt,0.5,3,16,45.0,22.2,9,12,44.1,22.7,screenshots/Screenshot 2026-10-19 at 16.46.00.png,19,21
+yolov8n.pt,0.35,5,21,47.8,20.9,8,12,46.9,21.3,screenshots/Screenshot 2026-10-19 at 16.48.07.png,26,20
