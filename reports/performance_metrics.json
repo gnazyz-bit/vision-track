@@ -1,6 +1,7 @@
+
 {
     "selected_model": "pretrained_yolov8n",
-    "evaluation_dataset": "/Users/Guest/vision-track/data/person_dataset/data.yaml",
+    "evaluation_dataset": "data/person_dataset/data.yaml",
     "evaluation_split": "val",
     "evaluation_device": "cpu",
     "confidence_threshold": 0.35,
@@ -13,7 +14,7 @@
     "models": {
         "pretrained_yolov8n": {
             "status": "success",
-            "model_path": "/Users/Guest/vision-track/yolov8n.pt",
+            "model_path": "yolov8n.pt",
             "detection": {
                 "precision": 0.7538,
                 "recall": 0.747,
@@ -37,7 +38,7 @@
         },
         "fine_tuned": {
             "status": "success",
-            "model_path": "/Users/Guest/vision-track/models/checkpoints/best.pt",
+            "model_path": "models/checkpoints/best.pt",
             "detection": {
                 "precision": 0.8578,
                 "recall": 0.759,
@@ -61,7 +62,7 @@
         },
         "quantized_onnx": {
             "status": "success",
-            "model_path": "/Users/Guest/vision-track/models/checkpoints/best_quantized.onnx",
+            "model_path": "models/checkpoints/best_quantized.onnx",
             "detection": {
                 "precision": 0.8729,
                 "recall": 0.7349,

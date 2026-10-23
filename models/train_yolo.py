@@ -1,3 +1,4 @@
+
 from pathlib import Path
 
 import torch
@@ -36,7 +37,7 @@ print(f"Using device: {device}")
 # Load pretrained YOLO model
 # --------------------------------------------------
 
-model = YOLO("yolov8n.pt")
+model = YOLO(str(PROJECT_ROOT / "yolov8n.pt"))
 
 
 # --------------------------------------------------
@@ -52,7 +53,7 @@ results = model.train(
 
     optimizer="AdamW",
     lr0=0.0005,
-    lrf=0.01, 
+    lrf=0.01,
     cos_lr=True,
 
     weight_decay=0.0005,

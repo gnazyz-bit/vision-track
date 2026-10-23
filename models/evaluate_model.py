@@ -48,6 +48,7 @@ MODELS = {
     "quantized_onnx": CHECKPOINT_DIR / "best_quantized.onnx",
 }
 
+
 # --------------------------------------------------
 # Evaluation settings
 # --------------------------------------------------
@@ -299,7 +300,7 @@ def main():
 
             all_results[model_name] = {
                 "status": "success",
-                "model_path": str(model_path),
+                "model_path": model_path.relative_to(PROJECT_ROOT).as_posix(),
                 "detection": detection,
                 "performance": performance,
             }
@@ -310,7 +311,7 @@ def main():
 
             all_results[model_name] = {
                 "status": "failed",
-                "model_path": str(model_path),
+                "model_path": model_path.relative_to(PROJECT_ROOT).as_posix(),
                 "error": str(exc),
             }
 
@@ -325,7 +326,7 @@ def main():
 
     report = {
         "selected_model": SELECTED_MODEL,
-        "evaluation_dataset": str(DATASET_YAML),
+        "evaluation_dataset": DATASET_YAML.relative_to(PROJECT_ROOT).as_posix(),
         "evaluation_split": "val",
         "evaluation_device": DEVICE,
         "confidence_threshold": CONFIDENCE,
